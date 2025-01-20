@@ -31,16 +31,20 @@ type Run struct {
 }
 
 type step struct {
-	r             *Run
-	text, command []string
-	canFail       bool
+	r                     *Run
+	text, command         []string
+	canFail, isBreakPoint bool
 }
 
 // Options specify the run options.
 type Options struct {
 	AutoTimeout      time.Duration
 	Auto             bool
+	BreakPoint       bool
+	ContinueOnError  bool
 	HideDescriptions bool
+	DryRun           bool
+	NoColor          bool
 	Immediate        bool
 	SkipSteps        int
 	Shell            string
@@ -66,7 +70,11 @@ func optionsFrom(ctx *cli.Context) Options {
 	return Options{
 		AutoTimeout:      ctx.Duration(FlagAutoTimeout),
 		Auto:             ctx.Bool(FlagAuto),
+		BreakPoint:       ctx.Bool(FlagBreakPoint),
+		ContinueOnError:  ctx.Bool(FlagContinueOnError),
 		HideDescriptions: ctx.Bool(FlagHideDescriptions),
+		DryRun:           ctx.Bool(FlagDryRun),
+		NoColor:          ctx.Bool(FlagNoColor),
 		Immediate:        ctx.Bool(FlagImmediate),
 		SkipSteps:        ctx.Int(FlagSkipSteps),
 		Shell:            ctx.String(FlagShell),
@@ -100,12 +108,17 @@ func (r *Run) Cleanup(cleanupFn func() error) {
 
 // Step creates a new step on the provided run.
 func (r *Run) Step(text, command []string) {
-	r.steps = append(r.steps, step{r, text, command, false})
+	r.steps = append(r.steps, step{r, text, command, false, false})
 }
 
 // StepCanFail creates a new step which can fail on execution.
 func (r *Run) StepCanFail(text, command []string) {
-	r.steps = append(r.steps, step{r, text, command, true})
+	r.steps = append(r.steps, step{r, text, command, true, false})
+}
+
+// BreakPoint creates a new step which can fail on execution.
+func (r *Run) BreakPoint() {
+	r.steps = append(r.steps, step{r, nil, nil, true, true})
 }
 
 // Run executes the run in the provided CLI context.
@@ -132,6 +145,10 @@ func (r *Run) RunWithOptions(opts Options) error {
 		if r.options.SkipSteps > i {
 			continue
 		}
+
+		if r.options.ContinueOnError {
+			step.canFail = true
+		}
 		if err := step.run(i+1, len(r.steps)); err != nil {
 			return err
 		}
@@ -141,11 +158,15 @@ func (r *Run) RunWithOptions(opts Options) error {
 }
 
 func (r *Run) printTitleAndDescription() error {
-	if err := write(r.out, color.Cyan.Sprintf("%s\n", r.title)); err != nil {
+	p := color.Cyan.Sprintf
+	if r.options.NoColor {
+		p = fmt.Sprintf
+	}
+	if err := write(r.out, p("%s\n", r.title)); err != nil {
 		return err
 	}
 	for range r.title {
-		if err := write(r.out, color.Cyan.Sprint("=")); err != nil {
+		if err := write(r.out, p("=")); err != nil {
 			return err
 		}
 	}
@@ -153,9 +174,14 @@ func (r *Run) printTitleAndDescription() error {
 		return err
 	}
 	if !r.options.HideDescriptions {
+		p = color.White.Darken().Sprintf
+		if r.options.NoColor {
+			p = fmt.Sprintf
+		}
+
 		for _, d := range r.description {
 			if err := write(
-				r.out, color.White.Darken().Sprintf("%s\n", d),
+				r.out, p("%s\n", d),
 			); err != nil {
 				return err
 			}
@@ -170,16 +196,22 @@ func (r *Run) printTitleAndDescription() error {
 
 func write(w io.Writer, str string) error {
 	_, err := w.Write([]byte(str))
+	if err != nil {
+		return fmt.Errorf("write: %w", err)
+	}
 
-	return err
+	return nil
 }
 
-func (s *step) run(current, max int) error {
+func (s *step) run(current, maximum int) error {
 	if err := s.waitOrSleep(); err != nil {
 		return fmt.Errorf("unable to run step: %v: %w", s, err)
 	}
 	if len(s.text) > 0 && !s.r.options.HideDescriptions {
-		s.echo(current, max)
+		s.echo(current, maximum)
+	}
+	if s.isBreakPoint {
+		return s.wait()
 	}
 	if len(s.command) > 0 {
 		return s.execute()
@@ -188,19 +220,30 @@ func (s *step) run(current, max int) error {
 	return nil
 }
 
-func (s *step) echo(current, max int) {
+func (s *step) echo(current, maximum int) {
+	p := color.White.Darken().Sprintf
+	if s.r.options.NoColor {
+		p = fmt.Sprintf
+	}
+
 	prepared := []string{}
 	for i, x := range s.text {
 		if i == len(s.text)-1 {
+			colon := ":"
+			if s.command == nil {
+				// Do not set the expectation that there is more if no command
+				// provided.
+				colon = ""
+			}
 			prepared = append(
 				prepared,
-				color.White.Darken().Sprintf(
-					"# %s [%d/%d]:\n",
-					x, current, max,
+				p(
+					"# %s [%d/%d]%s\n",
+					x, current, maximum, colon,
 				),
 			)
 		} else {
-			m := color.White.Darken().Sprintf("# %s", x)
+			m := p("# %s", x)
 			prepared = append(prepared, m)
 		}
 	}
@@ -214,10 +257,18 @@ func (s *step) execute() error {
 	cmd.Stderr = s.r.out
 	cmd.Stdout = s.r.out
 
-	cmdString := color.Green.Sprintf("> %s", strings.Join(s.command, " \\\n    "))
+	p := color.Green.Sprintf
+	if s.r.options.NoColor {
+		p = fmt.Sprintf
+	}
+
+	cmdString := p("> %s", strings.Join(s.command, " \\\n    "))
 	s.print(cmdString)
 	if err := s.waitOrSleep(); err != nil {
 		return fmt.Errorf("unable to execute step: %v: %w", s, err)
+	}
+	if s.r.options.DryRun {
+		return nil
 	}
 	err := cmd.Run()
 	if s.canFail {
@@ -232,13 +283,13 @@ func (s *step) execute() error {
 	return nil
 }
 
-//nolint:forbidigo // print is intended here
 func (s *step) print(msg ...string) error {
 	for _, m := range msg {
 		for _, c := range m {
 			if !s.r.options.Immediate {
-				//nolint:gosec // the sleep has no security implications
-				time.Sleep(time.Duration(rand.Intn(40)) * time.Millisecond)
+				const maximum = 40
+				//nolint:gosec,gomnd // the sleep has no security implications and is randomly chosen
+				time.Sleep(time.Duration(rand.Intn(maximum)) * time.Millisecond)
 			}
 			if err := write(s.r.out, fmt.Sprintf("%c", c)); err != nil {
 				return err
@@ -267,6 +318,26 @@ func (s *step) waitOrSleep() error {
 		if err := write(s.r.out, "\x1b[1A"); err != nil {
 			return err
 		}
+	}
+
+	return nil
+}
+
+func (s *step) wait() error {
+	if !s.r.options.BreakPoint {
+		return nil
+	}
+
+	if err := write(s.r.out, "bp"); err != nil {
+		return err
+	}
+	_, err := bufio.NewReader(os.Stdin).ReadBytes('\n')
+	if err != nil {
+		return fmt.Errorf("unable to read newline: %w", err)
+	}
+	// Move cursor up again
+	if err := write(s.r.out, "\x1b[1A"); err != nil {
+		return err
 	}
 
 	return nil

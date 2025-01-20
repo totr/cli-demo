@@ -1,10 +1,10 @@
 package demo
 
 import (
-	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"time"
 
 	"github.com/urfave/cli/v2"
@@ -33,15 +33,28 @@ const (
 	// enabled.
 	FlagAutoTimeout = "auto-timeout"
 
+	// FlagBreakPoint is the flag for doing`auto` but with breakpoint.
+	FlagBreakPoint = "with-breakpoints"
+
+	// FlagContinueOnError is the flag for steps continue running if
+	// there is an error.
+	FlagContinueOnError = "continue-on-error"
+
 	// FlagContinuously is the flag for running the demos continuously without
 	// any end.
 	FlagContinuously = "continuously"
+
+	// DryRun only prints the command in the stdout.
+	FlagDryRun = "dry-run"
 
 	// FlagHideDescriptions is the flag for hiding the descriptions.
 	FlagHideDescriptions = "hide-descriptions"
 
 	// FlagImmediate is the flag for disabling the text animations.
 	FlagImmediate = "immediate"
+
+	// NoColor true to print without colors, special characters for writing into file.
+	FlagNoColor = "no-color"
 
 	// FlagSkipSteps is the flag for skipping n amount of steps.
 	FlagSkipSteps = "skip-steps"
@@ -67,11 +80,28 @@ func New() *Demo {
 			Usage: "run the demo in automatic mode, " +
 				"where every step gets executed automatically",
 		},
+		&cli.BoolFlag{
+			Name:  FlagDryRun,
+			Value: false,
+			Usage: "run the demo and only prints the commands",
+		},
+		&cli.BoolFlag{
+			Name:  FlagNoColor,
+			Usage: "run the demo and output to be without colors",
+		},
 		&cli.DurationFlag{
 			Name:    FlagAutoTimeout,
 			Aliases: []string{"t"},
 			Usage:   "the timeout to be waited when `auto` is enabled",
-			Value:   3 * time.Second,
+			Value:   1 * time.Second,
+		},
+		&cli.BoolFlag{
+			Name:  FlagBreakPoint,
+			Usage: "breakpoint",
+		},
+		&cli.BoolFlag{
+			Name:  FlagContinueOnError,
+			Usage: "continue if there a step fails",
 		},
 		&cli.BoolFlag{
 			Name:    FlagContinuously,
@@ -164,7 +194,7 @@ func (d *Demo) Cleanup(cleanupFn func(*cli.Context) error) {
 
 func (d *Demo) Add(run *Run, name, description string) {
 	flag := &cli.BoolFlag{
-		Name:    fmt.Sprintf("%d", len(d.runs)),
+		Name:    strconv.Itoa(len(d.runs)),
 		Aliases: []string{name},
 		Usage:   description,
 	}
